@@ -14,8 +14,10 @@ import sys
 import os
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 import rookiepy
 import requests
@@ -25,7 +27,17 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 STATE_FILE = SCRIPT_DIR / ".shanbay_state.json"
 LOG_FILE = SCRIPT_DIR / "shanbay.log"
 
-# 配置日志
+# 配置日志 - 自定义过滤器以脱敏敏感信息
+class SensitiveDataFilter(logging.Filter):
+    """过滤日志中的敏感数据"""
+    def filter(self, record):
+        # 对消息进行脱敏处理
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            # 移除或替换可能的 CSRF token 和 cookie 值
+            record.msg = re.sub(r'csrftoken=[a-zA-Z0-9]+', 'csrftoken=***', record.msg)
+            record.msg = re.sub(r'"csrftoken":\s*"[a-zA-Z0-9]+"', '"csrftoken": "***"', record.msg)
+        return True
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -35,6 +47,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+logger.addFilter(SensitiveDataFilter())
 
 
 def load_state():
@@ -43,15 +56,22 @@ def load_state():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"状态文件读取失败：{e}")
             pass
     return {"last_check_date": None, "today_completed": False, "last_log_cleanup": None}
 
 
 def save_state(state):
     """保存本地状态文件"""
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        # 设置文件权限为仅所有者可读写 (Unix 系统)
+        if os.name != 'nt':  # 非 Windows 系统
+            os.chmod(STATE_FILE, 0o600)
+    except IOError as e:
+        logger.error(f"状态文件写入失败：{e}")
 
 
 def cleanup_old_logs():
@@ -83,7 +103,7 @@ def cleanup_old_logs():
                         log_date = datetime.strptime(log_date_str, "%Y-%m-%d %H:%M:%S,%f")
                         if log_date >= cutoff_date:
                             lines_to_keep.append(line)
-                    except:
+                    except (ValueError, IndexError):
                         # 无法解析的行也保留
                         lines_to_keep.append(line)
         
@@ -107,6 +127,10 @@ def get_session():
 
     jar = {c["name"]: c["value"] for c in cookies}
     csrf = jar.get("csrftoken", "")
+    
+    if not csrf:
+        logger.error("[-] 未找到 CSRF token，请检查 cookie 是否有效")
+        sys.exit(1)
 
     s = requests.Session()
     s.cookies.update(jar)
@@ -115,63 +139,107 @@ def get_session():
         "Content-Type": "application/json",
         "Referer": "https://web.shanbay.com/wordsweb/",
         "Origin": "https://web.shanbay.com",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
     })
     return s
 
 
 def get_book_id(s):
     """获取当前词书的 API 路径标识（如 segal/cet4 等短码）"""
-    r = s.get("https://apiv3.shanbay.com/wordsapp/user_material_books/current")
-    data = r.json()
-    # 尝试从 learning_task_id 或 materialbook 中获取
-    book_id = data.get("materialbook", {}).get("book_id") or data.get("learning_task_id", "segle")
-    return book_id
+    try:
+        r = s.get("https://apiv3.shanbay.com/wordsapp/user_material_books/current", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        
+        # 验证响应数据结构
+        if not isinstance(data, dict):
+            logger.error("[-] API 返回数据格式错误：非字典类型")
+            return "segle"
+            
+        # 尝试从 learning_task_id 或 materialbook 中获取
+        book_id = None
+        materialbook = data.get("materialbook")
+        if isinstance(materialbook, dict):
+            book_id = materialbook.get("book_id")
+        if not book_id:
+            book_id = data.get("learning_task_id", "segle")
+            
+        return book_id
+    except requests.exceptions.RequestException as e:
+        logger.error(f"[-] 获取词书 ID 失败：{e}")
+        return "segle"
+    except json.JSONDecodeError as e:
+        logger.error(f"[-] 解析 API 响应失败：{e}")
+        return "segle"
 
 
 def complete_daily(s, book_id="segle"):
     """完成每日背词任务"""
     base = f"https://apiv3.shanbay.com/wordsapp/user_material_books/{book_id}/learning"
 
-    # 1. 检查状态
-    r = s.get(f"{base}/statuses")
-    status = r.json()
-    if status.get("is_finished"):
-        logger.info("[+] 今日任务已完成，无需操作")
-        return True
+    try:
+        # 1. 检查状态
+        r = s.get(f"{base}/statuses", timeout=10)
+        r.raise_for_status()
+        status = r.json()
+        
+        if not isinstance(status, dict):
+            logger.error("[-] 状态响应格式错误")
+            return False
+            
+        if status.get("is_finished"):
+            logger.info("[+] 今日任务已完成，无需操作")
+            return True
 
-    total = status.get("a_count", 0) + status.get("c_count", 0)
-    logger.info(f"[*] 今日任务：{status.get('a_count', 0)} 新词 + {status.get('c_count', 0)} 复习")
+        total = status.get("a_count", 0) + status.get("c_count", 0)
+        logger.info(f"[*] 今日任务：{status.get('a_count', 0)} 新词 + {status.get('c_count', 0)} 复习")
 
-    # 2. 获取待学词条
-    r = s.get(f"{base}/items/sync")
-    data = r.json()
-    a_items = data.get("a_not_finished_items", [])
-    c_items = data.get("c_not_finished_items", [])
+        # 2. 获取待学词条
+        r = s.get(f"{base}/items/sync", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        
+        if not isinstance(data, dict):
+            logger.error("[-] 词条同步响应格式错误")
+            return False
+            
+        a_items = data.get("a_not_finished_items", [])
+        c_items = data.get("c_not_finished_items", [])
 
-    if not a_items and not c_items:
-        logger.info("[+] 没有待学词条")
-        return True
+        if not a_items and not c_items:
+            logger.info("[+] 没有待学词条")
+            return True
 
-    def to_item(i):
-        return {"item_id": i["item_id"], "schedule": i["schedule"], "failed_count": i["failed_count"]}
+        def to_item(i):
+            if not isinstance(i, dict) or "item_id" not in i:
+                return None
+            return {"item_id": i["item_id"], "schedule": i.get("schedule", 0), "failed_count": i.get("failed_count", 0)}
 
-    # 3. 全部标记为"认识"提交
-    body = {
-        "a_items": [],
-        "a_items_known": [to_item(i) for i in a_items],
-        "c_items": [],
-        "c_items_known": [to_item(i) for i in c_items],
-        "date": status.get("date", ""),
-        "learning_time": max(total * 3, 60),  # 模拟学习时间
-    }
+        # 3. 全部标记为"认识"提交
+        body = {
+            "a_items": [],
+            "a_items_known": [to_item(i) for i in a_items if to_item(i)],
+            "c_items": [],
+            "c_items_known": [to_item(i) for i in c_items if to_item(i)],
+            "date": status.get("date", ""),
+            "learning_time": max(total * 3, 60),  # 模拟学习时间
+        }
 
-    r = s.put(f"{base}/items/sync", json=body)
-    if r.status_code == 200:
-        logger.info(f"[+] 完成！{len(a_items)} 新词 + {len(c_items)} 复习，全部标记为认识")
-        return True
-    else:
-        logger.error(f"[-] 提交失败：{r.status_code} {r.text[:200]}")
+        r = s.put(f"{base}/items/sync", json=body, timeout=10)
+        if r.status_code == 200:
+            logger.info(f"[+] 完成！{len(a_items)} 新词 + {len(c_items)} 复习，全部标记为认识")
+            return True
+        else:
+            logger.error(f"[-] 提交失败：{r.status_code} {r.text[:200]}")
+            return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"[-] 网络请求失败：{e}")
+        return False
+    except json.JSONDecodeError as e:
+        logger.error(f"[-] JSON 解析失败：{e}")
+        return False
+    except (KeyError, TypeError) as e:
+        logger.error(f"[-] 数据处理错误：{e}")
         return False
 
 
