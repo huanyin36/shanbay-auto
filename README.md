@@ -29,12 +29,6 @@ python shanbay.py
 [+] 完成！40 新词 + 0 复习，全部标记为认识
 ```
 
-## 定时执行（Windows）
-
-```powershell
-schtasks /create /tn "ShanbayDaily" /tr "D:\shanbay_bot\run.bat" /sc daily /st 08:00 /f
-```
-
 ## 注意事项
 
 - 仅支持 Windows + Edge（rookiepy 从 Edge 的 cookie 数据库提取凭证）
