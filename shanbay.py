@@ -156,14 +156,16 @@ def get_book_id(s):
             logger.error("[-] API 返回数据格式错误：非字典类型")
             return "segle"
             
-        # 尝试从 learning_task_id 或 materialbook 中获取
-        book_id = None
-        materialbook = data.get("materialbook")
-        if isinstance(materialbook, dict):
-            book_id = materialbook.get("book_id")
+        # 词书短码在 materialbook_id（顶层）或 materialbook.id 中；
+        # learning_task_id 是任务 id，不能用于 URL，否则会 404
+        book_id = data.get("materialbook_id")
         if not book_id:
-            book_id = data.get("learning_task_id", "segle")
-            
+            materialbook = data.get("materialbook")
+            if isinstance(materialbook, dict):
+                book_id = materialbook.get("id")
+        if not book_id:
+            book_id = "segle"
+
         return book_id
     except requests.exceptions.RequestException as e:
         logger.error(f"[-] 获取词书 ID 失败：{e}")
