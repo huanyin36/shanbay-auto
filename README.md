@@ -6,18 +6,22 @@
 
 通过 [rookiepy](https://github.com/lwouis/rookiepy) 从本机 Edge 浏览器提取已登录的扇贝 cookie，直接调用扇贝内部 API 将当日全部词条标记为"认识"，跳过浏览器渲染和 UI 交互。
 
-## 安装
+## 快速开始（推荐）
+
+1. 安装 [Python](https://www.python.org)，安装时勾选 **Add python.exe to PATH**
+2. 在 Edge 浏览器登录 [web.shanbay.com](https://web.shanbay.com)
+3. 双击 `install.bat`
+
+`install.bat` 会自动安装依赖，并创建登录触发的计划任务 `ShanbayDaily`。之后每次开机登录自动刷词，同一天只跑一次（由 `.shanbay_state.json` 去重，失败当天可重试）。
+
+- 手动跑一次：双击 `run.bat`
+- 运行日志：`shanbay.log`
+- 移除自启：双击 `uninstall.bat`
+
+## 手动方式
 
 ```bash
 pip install -r requirements.txt
-```
-
-## 使用
-
-1. 确保已在 Edge 浏览器中登录 [web.shanbay.com](https://web.shanbay.com)
-2. 运行：
-
-```bash
 python shanbay.py
 ```
 
