@@ -1,4 +1,3 @@
-```
 # Python
 __pycache__/
 *.pyc
@@ -15,6 +14,9 @@ venv/
 # Logs
 *.log
 
+# 运行态 / 本地状态
+.shanbay_state.json
+
 # Temporary files
 *.tmp
 *.swp
@@ -27,4 +29,7 @@ venv/
 dist/
 build/
 target/
-```
+
+# 系统
+.DS_Store
+Thumbs.db
