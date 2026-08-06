@@ -1,8 +1,9 @@
 """
-扇贝单词自动刷词 v3 - 纯 API 版
-无需浏览器，直接从 Edge 提取 cookie 调用 API，2秒刷完40词。
+扇贝单词自动刷词 v4 - CDP + API 版
+通过 Chrome DevTools Protocol 从 Edge 提取 cookie，调用 API 完成刷词。
+解决了新版 Edge cookie 加密格式变化导致 rookiepy 无法解密的问题。
 
-依赖: pip install rookiepy requests
+依赖: pip install requests websocket-client
 用法: python shanbay.py
 
 功能增强:
@@ -15,12 +16,14 @@ import os
 import json
 import logging
 import re
+import subprocess
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-import rookiepy
 import requests
+import websocket
 
 # 配置路径
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -118,16 +121,122 @@ def cleanup_old_logs():
         logger.error(f"[-] 日志清理失败：{e}")
 
 
+def find_edge_exe():
+    """查找 Edge 可执行文件路径"""
+    # 1. 便携版常见路径
+    for pattern in [r"D:\Edge\Edge\*\msedge.exe", r"D:\Edge\*\msedge.exe"]:
+        from glob import glob
+        matches = glob(pattern)
+        if matches:
+            return matches[0]
+
+    # 2. 注册表（junction / 标准安装）
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe")
+        path = winreg.QueryValue(key, None)
+        winreg.CloseKey(key)
+        if path and os.path.isfile(path):
+            return path
+    except Exception:
+        pass
+
+    # 3. 标准路径
+    for env_var in ["PROGRAMFILES", "PROGRAMFILES(X86)"]:
+        p = os.path.join(os.environ.get(env_var, ""), r"Microsoft\Edge\Application\msedge.exe")
+        if os.path.isfile(p):
+            return p
+
+    return None
+
+
+def ensure_debug_port(port=9222):
+    """确保 Edge 开启了远程调试端口"""
+    # 已经开了？
+    try:
+        r = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=2)
+        if r.ok:
+            return True
+    except Exception:
+        pass
+
+    edge_exe = find_edge_exe()
+    if not edge_exe:
+        logger.error("[-] 找不到 Edge 浏览器")
+        return False
+
+    # 启动 Edge 并附加调试端口（如果已在运行则附加到现有进程）
+    subprocess.Popen([
+        edge_exe,
+        f"--remote-debugging-port={port}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 等待端口就绪
+    for _ in range(10):
+        time.sleep(1)
+        try:
+            r = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=2)
+            if r.ok:
+                return True
+        except Exception:
+            continue
+
+    logger.error("[-] Edge 调试端口启动超时")
+    return False
+
+
+def get_cookies_via_cdp(port=9222):
+    """通过 CDP 从 Edge 提取扇贝 cookie"""
+    try:
+        pages = requests.get(f"http://127.0.0.1:{port}/json", timeout=5).json()
+    except Exception as e:
+        logger.error(f"[-] 无法连接 Edge 调试端口：{e}")
+        return {}
+
+    if not pages:
+        logger.error("[-] Edge 没有打开的页面")
+        return {}
+
+    # 用第一个页面获取 cookie
+    ws_url = pages[0]["webSocketDebuggerUrl"]
+    ws = websocket.WebSocket()
+    ws.connect(ws_url, suppress_origin=True)
+
+    ws.send(json.dumps({
+        "id": 1,
+        "method": "Network.getCookies",
+        "params": {"urls": ["https://web.shanbay.com", "https://apiv3.shanbay.com"]}
+    }))
+
+    resp = json.loads(ws.recv())
+    ws.close()
+
+    if "result" not in resp:
+        logger.error(f"[-] CDP 返回错误：{resp.get('error')}")
+        return {}
+
+    cookies = {}
+    for c in resp["result"].get("cookies", []):
+        if "shanbay" in c.get("domain", ""):
+            cookies[c["name"]] = c["value"]
+
+    return cookies
+
+
 def get_session():
     """从 Edge 浏览器提取扇贝 cookie，构建请求会话"""
-    cookies = rookiepy.edge(domains=[".shanbay.com"])
-    if not cookies:
+    if not ensure_debug_port():
+        sys.exit(1)
+
+    jar = get_cookies_via_cdp()
+    if not jar:
         logger.error("[-] 未找到扇贝 cookie，请先在 Edge 中登录 web.shanbay.com")
         sys.exit(1)
 
-    jar = {c["name"]: c["value"] for c in cookies}
     csrf = jar.get("csrftoken", "")
-    
     if not csrf:
         logger.error("[-] 未找到 CSRF token，请检查 cookie 是否有效")
         sys.exit(1)
@@ -139,7 +248,7 @@ def get_session():
         "Content-Type": "application/json",
         "Referer": "https://web.shanbay.com/wordsweb/",
         "Origin": "https://web.shanbay.com",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0",
     })
     return s
 
@@ -246,7 +355,7 @@ def complete_daily(s, book_id="segle"):
 
 
 def main():
-    logger.info("[*] 扇贝单词自动刷词 v3 (API)")
+    logger.info("[*] 扇贝单词自动刷词 v4 (CDP+API)")
     
     # 1. 先清理旧日志（每周一次）
     cleanup_old_logs()
