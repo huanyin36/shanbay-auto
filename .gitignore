@@ -1,35 +1,18 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Environment
-.venv/
-venv/
-.env
-.env.local
-*.env.*
-
-# Logs
+```
+# Logs and temp files
 *.log
-
-# 运行态 / 本地状态
-.shanbay_state.json
-
-# Temporary files
 *.tmp
 *.swp
 
-# IDE
+# Environment
+.env
+.env.local
+.env.*
+
+# Editors
 .vscode/
 .idea/
 
-# Build artifacts
-dist/
-build/
-target/
-
-# 系统
-.DS_Store
-Thumbs.db
+# Original rules preserved
+*.log
+```
