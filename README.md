@@ -32,10 +32,27 @@ python shanbay.py
 
 输出示例：
 ```
-[*] 扇贝单词自动刷词 v3 (API)
+[*] 扇贝单词自动刷词 v4 (CDP+API)
 [+] Cookie 有效
 [*] 今日任务: 40 新词 + 0 复习
 [+] 完成！40 新词 + 0 复习，全部标记为认识
+```
+
+## 配置（可选）
+
+脚本会启动一个带调试端口的 Edge 实例来提取扇贝 cookie。Edge 的用户数据目录与缓存目录默认使用 `D:\Edge\Data` 与 `D:\Edge\Cache`，你可以通过环境变量覆盖：
+
+| 环境变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `SHANBAY_EDGE_USER_DATA_DIR` | Edge 用户数据目录 | `D:\Edge\Data` |
+| `SHANBAY_EDGE_DISK_CACHE_DIR` | Edge 磁盘缓存目录 | `D:\Edge\Cache` |
+
+例如自定义到其他路径：
+
+```bat
+set SHANBAY_EDGE_USER_DATA_DIR=C:\MyEdge\Data
+set SHANBAY_EDGE_DISK_CACHE_DIR=C:\MyEdge\Cache
+python shanbay.py
 ```
 
 ## 注意事项
