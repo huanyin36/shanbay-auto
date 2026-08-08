@@ -1,4 +1,4 @@
-"""
+r"""
 扇贝单词自动刷词 v4 - CDP + API 版
 通过 Chrome DevTools Protocol 从 Edge 提取 cookie，调用 API 完成刷词。
 解决了新版 Edge cookie 加密格式变化导致 rookiepy 无法解密的问题。
@@ -9,6 +9,9 @@
 功能增强:
 - 每日首次运行检测任务状态，完成后当天不再重复检测
 - 每周自动清理一次日志文件
+
+配置说明:
+- 可通过环境变量 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 自定义 Edge 用户数据目录与缓存目录（默认 D:\Edge\Data、D:\Edge\Cache）
 """
 
 import sys
@@ -29,6 +32,11 @@ import websocket
 SCRIPT_DIR = Path(__file__).parent.resolve()
 STATE_FILE = SCRIPT_DIR / ".shanbay_state.json"
 LOG_FILE = SCRIPT_DIR / "shanbay.log"
+
+# Edge 用户数据目录与缓存目录：可通过环境变量自定义，未设置时回退到项目默认路径。
+# 默认 D:\Edge\Data / D:\Edge\Cache 是项目一贯设定，可移植性由环境变量保证。
+EDGE_USER_DATA_DIR = os.environ.get("SHANBAY_EDGE_USER_DATA_DIR", r"D:\Edge\Data")
+EDGE_DISK_CACHE_DIR = os.environ.get("SHANBAY_EDGE_DISK_CACHE_DIR", r"D:\Edge\Cache")
 
 # 配置日志 - 自定义过滤器以脱敏敏感信息
 class SensitiveDataFilter(logging.Filter):
@@ -167,15 +175,19 @@ def ensure_debug_port(port=9222):
         return False
 
     # 启动 Edge 并附加调试端口（如果已在运行则附加到现有进程）
+    # 必须显式指定 user-data-dir：chrome++ 钩子移除后，无参启动会落进 AppData 旧配置。
+    # 目录取自常量，可经环境变量 SHANBAY_EDGE_* 覆盖，避免硬编码作者本机路径。
     subprocess.Popen([
         edge_exe,
         f"--remote-debugging-port={port}",
         "--no-first-run",
         "--no-default-browser-check",
+        f"--user-data-dir={EDGE_USER_DATA_DIR}",
+        f"--disk-cache-dir={EDGE_DISK_CACHE_DIR}",
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 等待端口就绪
-    for _ in range(10):
+    for _ in range(20):
         time.sleep(1)
         try:
             r = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=2)
