@@ -40,12 +40,12 @@ python shanbay.py
 
 ## 配置（可选）
 
-脚本会启动一个带调试端口的 Edge 实例来提取扇贝 cookie。Edge 的用户数据目录与缓存目录默认使用 `D:\Edge\Data` 与 `D:\Edge\Cache`，你可以通过环境变量覆盖：
+脚本会启动一个带调试端口的 Edge 实例来提取扇贝 cookie。脚本默认不指定用户数据目录与缓存目录，直接使用 Edge 自身默认配置（标准安装开箱即用），你可以通过环境变量覆盖：
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `SHANBAY_EDGE_USER_DATA_DIR` | Edge 用户数据目录 | `D:\Edge\Data` |
-| `SHANBAY_EDGE_DISK_CACHE_DIR` | Edge 磁盘缓存目录 | `D:\Edge\Cache` |
+| `SHANBAY_EDGE_USER_DATA_DIR` | Edge 用户数据目录 | （Edge 默认，不指定） |
+| `SHANBAY_EDGE_DISK_CACHE_DIR` | Edge 磁盘缓存目录 | （Edge 默认，不指定） |
 
 例如自定义到其他路径：
 
