@@ -11,7 +11,7 @@ r"""
 - 每周自动清理一次日志文件
 
 配置说明:
-- 可通过环境变量 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 自定义 Edge 用户数据目录与缓存目录（默认 D:\Edge\Data、D:\Edge\Cache）
+- 可通过环境变量 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 自定义 Edge 用户数据目录与缓存目录；未设置时默认使用 Edge 自身配置（标准安装开箱即用），仅便携版等需自定义路径时再设置
 """
 
 import sys
@@ -33,10 +33,10 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 STATE_FILE = SCRIPT_DIR / ".shanbay_state.json"
 LOG_FILE = SCRIPT_DIR / "shanbay.log"
 
-# Edge 用户数据目录与缓存目录：可通过环境变量自定义，未设置时回退到项目默认路径。
-# 默认 D:\Edge\Data / D:\Edge\Cache 是项目一贯设定，可移植性由环境变量保证。
-EDGE_USER_DATA_DIR = os.environ.get("SHANBAY_EDGE_USER_DATA_DIR", r"D:\Edge\Data")
-EDGE_DISK_CACHE_DIR = os.environ.get("SHANBAY_EDGE_DISK_CACHE_DIR", r"D:\Edge\Cache")
+# Edge 用户数据目录与缓存目录：默认不指定，使用 Edge 自身默认配置（标准安装开箱即用）；
+# 仅当设置了对应环境变量时才显式追加 --user-data-dir / --disk-cache-dir（便携版 Edge 等场景）。
+EDGE_USER_DATA_DIR = os.environ.get("SHANBAY_EDGE_USER_DATA_DIR")
+EDGE_DISK_CACHE_DIR = os.environ.get("SHANBAY_EDGE_DISK_CACHE_DIR")
 
 # 配置日志 - 自定义过滤器以脱敏敏感信息
 class SensitiveDataFilter(logging.Filter):
@@ -174,17 +174,21 @@ def ensure_debug_port(port=9222):
         logger.error("[-] 找不到 Edge 浏览器")
         return False
 
-    # 启动 Edge 并附加调试端口（如果已在运行则附加到现有进程）
-    # 必须显式指定 user-data-dir：chrome++ 钩子移除后，无参启动会落进 AppData 旧配置。
-    # 目录取自常量，可经环境变量 SHANBAY_EDGE_* 覆盖，避免硬编码作者本机路径。
-    subprocess.Popen([
+    # 启动 Edge 并附加调试端口。
+    # 默认不指定 user-data-dir / disk-cache-dir，让 Edge 使用自身默认用户配置（标准安装开箱即用）。
+    # 仅当设置了 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 时才追加对应参数，
+    # 以便便携版 Edge 等自定义场景使用。
+    edge_args = [
         edge_exe,
         f"--remote-debugging-port={port}",
         "--no-first-run",
         "--no-default-browser-check",
-        f"--user-data-dir={EDGE_USER_DATA_DIR}",
-        f"--disk-cache-dir={EDGE_DISK_CACHE_DIR}",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ]
+    if EDGE_USER_DATA_DIR:
+        edge_args.append(f"--user-data-dir={EDGE_USER_DATA_DIR}")
+    if EDGE_DISK_CACHE_DIR:
+        edge_args.append(f"--disk-cache-dir={EDGE_DISK_CACHE_DIR}")
+    subprocess.Popen(edge_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 等待端口就绪
     for _ in range(20):
