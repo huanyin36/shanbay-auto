@@ -81,25 +81,7 @@ python shanbay.py
 2. **配置文件** `.shanbay_config.json`（`install.bat` 自动生成）
 3. **默认** Edge
 
-### 环境变量
 
-| 环境变量 | 说明 | 默认值 |
-| --- | --- | --- |
-| `SHANBAY_BROWSER` | 浏览器类型（`edge` / `chrome`） | `edge` |
-| `SHANBAY_BROWSER_PATH` | 浏览器可执行文件路径（通用） | （自动检测） |
-| `SHANBAY_EDGE_PATH` | Edge 可执行文件路径（专用） | （自动检测） |
-| `SHANBAY_EDGE_USER_DATA_DIR` | Edge 用户数据目录 | （Edge 默认） |
-| `SHANBAY_EDGE_DISK_CACHE_DIR` | Edge 磁盘缓存目录 | （Edge 默认） |
-| `SHANBAY_CHROME_USER_DATA_DIR` | Chrome 用户数据目录 | （Chrome 默认） |
-| `SHANBAY_CHROME_DISK_CACHE_DIR` | Chrome 磁盘缓存目录 | （Chrome 默认） |
-
-示例：
-
-```bat
-set SHANBAY_BROWSER=chrome
-set SHANBAY_BROWSER_PATH=C:\Portable\Chrome\chrome.exe
-python shanbay.py
-```
 
 ## 注意事项
 
@@ -109,6 +91,20 @@ python shanbay.py
 - 所有词条标记为"认识"，适合刷量/打卡场景，不适合真正背词
 - 脚本会通过 CDP 开启浏览器远程调试端口（9222），仅用于本地提取 cookie
 - 请自行评估使用风险
+
+## 更新日志
+
+### v4.1
+
+- 🔒 WebSocket 通信增加 10 秒超时保护，避免脚本无限挂起
+- 🔒 日志脱敏扩展：覆盖 `sessionid`、`auth_token` 等敏感字段
+- 🔁 网络请求增加 3 次指数退避重试，提升 API 偶发故障时的稳定性
+- 📊 学习时间随机化（每词 3-8 秒），降低风控检测风险
+- 🧹 `get_session()` 改为抛异常而非 `sys.exit()`，便于调用方统一处理
+- 🧹 移除硬编码的 D 盘便携版路径，改用 `SHANBAY_EDGE_PATH` 环境变量
+- 🧹 `get_book_id()` 失败时不再静默 fallback，改为明确报错
+- 🧹 修复 `.gitignore` 中重复的 `*.log` 规则
+- ⏱️ 计划任务登录触发增加 45 秒延迟，等待网络就绪和 Edge 启动
 
 ## License
 
