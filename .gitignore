@@ -1,8 +1,10 @@
-```
 # Logs and temp files
 *.log
 *.tmp
 *.swp
+
+# State files
+.shanbay_state.json
 
 # Environment
 .env
@@ -12,7 +14,3 @@
 # Editors
 .vscode/
 .idea/
-
-# Original rules preserved
-*.log
-```
