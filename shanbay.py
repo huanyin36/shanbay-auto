@@ -9,9 +9,13 @@ r"""
 功能增强:
 - 每日首次运行检测任务状态，完成后当天不再重复检测
 - 每周自动清理一次日志文件
+- 网络请求自动重试（指数退避）
+- WebSocket 超时保护
+- 学习时间随机化以规避风控
 
 配置说明:
 - 可通过环境变量 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 自定义 Edge 用户数据目录与缓存目录；未设置时默认使用 Edge 自身配置（标准安装开箱即用），仅便携版等需自定义路径时再设置
+- 可通过环境变量 SHANBAY_EDGE_PATH 自定义 Edge 可执行文件路径
 """
 
 import sys
@@ -21,6 +25,8 @@ import logging
 import re
 import subprocess
 import time
+import random
+from glob import glob
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -37,16 +43,29 @@ LOG_FILE = SCRIPT_DIR / "shanbay.log"
 # 仅当设置了对应环境变量时才显式追加 --user-data-dir / --disk-cache-dir（便携版 Edge 等场景）。
 EDGE_USER_DATA_DIR = os.environ.get("SHANBAY_EDGE_USER_DATA_DIR")
 EDGE_DISK_CACHE_DIR = os.environ.get("SHANBAY_EDGE_DISK_CACHE_DIR")
+# 自定义 Edge 可执行文件路径（可选）
+EDGE_EXE_PATH = os.environ.get("SHANBAY_EDGE_PATH")
+
+# 网络请求重试配置
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2  # 指数退避基数（秒）
 
 # 配置日志 - 自定义过滤器以脱敏敏感信息
 class SensitiveDataFilter(logging.Filter):
     """过滤日志中的敏感数据"""
+    SENSITIVE_PATTERNS = [
+        (r'csrftoken=[a-zA-Z0-9]+', 'csrftoken=***'),
+        (r'"csrftoken":\s*"[a-zA-Z0-9]+"', '"csrftoken": "***"'),
+        (r'sessionid=[a-zA-Z0-9]+', 'sessionid=***'),
+        (r'"sessionid":\s*"[a-zA-Z0-9]+"', '"sessionid": "***"'),
+        (r'auth_token=[a-zA-Z0-9]+', 'auth_token=***'),
+        (r'"auth_token":\s*"[a-zA-Z0-9]+"', '"auth_token": "***"'),
+    ]
+
     def filter(self, record):
-        # 对消息进行脱敏处理
         if hasattr(record, 'msg') and isinstance(record.msg, str):
-            # 移除或替换可能的 CSRF token 和 cookie 值
-            record.msg = re.sub(r'csrftoken=[a-zA-Z0-9]+', 'csrftoken=***', record.msg)
-            record.msg = re.sub(r'"csrftoken":\s*"[a-zA-Z0-9]+"', '"csrftoken": "***"', record.msg)
+            for pattern, replacement in self.SENSITIVE_PATTERNS:
+                record.msg = re.sub(pattern, replacement, record.msg)
         return True
 
 logging.basicConfig(
@@ -59,6 +78,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.addFilter(SensitiveDataFilter())
+
+
+class ShanbayError(Exception):
+    """扇贝脚本自定义异常"""
+    pass
 
 
 def load_state():
@@ -131,14 +155,11 @@ def cleanup_old_logs():
 
 def find_edge_exe():
     """查找 Edge 可执行文件路径"""
-    # 1. 便携版常见路径
-    for pattern in [r"D:\Edge\Edge\*\msedge.exe", r"D:\Edge\*\msedge.exe"]:
-        from glob import glob
-        matches = glob(pattern)
-        if matches:
-            return matches[0]
+    # 0. 环境变量指定的路径（最高优先级）
+    if EDGE_EXE_PATH and os.path.isfile(EDGE_EXE_PATH):
+        return EDGE_EXE_PATH
 
-    # 2. 注册表（junction / 标准安装）
+    # 1. 注册表（标准安装）
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
@@ -150,7 +171,7 @@ def find_edge_exe():
     except Exception:
         pass
 
-    # 3. 标准路径
+    # 2. 标准路径
     for env_var in ["PROGRAMFILES", "PROGRAMFILES(X86)"]:
         p = os.path.join(os.environ.get(env_var, ""), r"Microsoft\Edge\Application\msedge.exe")
         if os.path.isfile(p):
@@ -171,7 +192,7 @@ def ensure_debug_port(port=9222):
 
     edge_exe = find_edge_exe()
     if not edge_exe:
-        logger.error("[-] 找不到 Edge 浏览器")
+        logger.error("[-] 找不到 Edge 浏览器，可通过环境变量 SHANBAY_EDGE_PATH 指定路径")
         return False
 
     # 启动 Edge 并附加调试端口。
@@ -219,16 +240,28 @@ def get_cookies_via_cdp(port=9222):
     # 用第一个页面获取 cookie
     ws_url = pages[0]["webSocketDebuggerUrl"]
     ws = websocket.WebSocket()
-    ws.connect(ws_url, suppress_origin=True)
+    ws.settimeout(10)  # 设置 WebSocket 超时
+    try:
+        ws.connect(ws_url, suppress_origin=True)
 
-    ws.send(json.dumps({
-        "id": 1,
-        "method": "Network.getCookies",
-        "params": {"urls": ["https://web.shanbay.com", "https://apiv3.shanbay.com"]}
-    }))
+        ws.send(json.dumps({
+            "id": 1,
+            "method": "Network.getCookies",
+            "params": {"urls": ["https://web.shanbay.com", "https://apiv3.shanbay.com"]}
+        }))
 
-    resp = json.loads(ws.recv())
-    ws.close()
+        resp = json.loads(ws.recv())
+    except websocket.WebSocketTimeoutException:
+        logger.error("[-] CDP WebSocket 通信超时")
+        return {}
+    except websocket.WebSocketException as e:
+        logger.error(f"[-] CDP WebSocket 通信失败：{e}")
+        return {}
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
 
     if "result" not in resp:
         logger.error(f"[-] CDP 返回错误：{resp.get('error')}")
@@ -245,17 +278,15 @@ def get_cookies_via_cdp(port=9222):
 def get_session():
     """从 Edge 浏览器提取扇贝 cookie，构建请求会话"""
     if not ensure_debug_port():
-        sys.exit(1)
+        raise ShanbayError("无法开启 Edge 调试端口")
 
     jar = get_cookies_via_cdp()
     if not jar:
-        logger.error("[-] 未找到扇贝 cookie，请先在 Edge 中登录 web.shanbay.com")
-        sys.exit(1)
+        raise ShanbayError("未找到扇贝 cookie，请先在 Edge 中登录 web.shanbay.com")
 
     csrf = jar.get("csrftoken", "")
     if not csrf:
-        logger.error("[-] 未找到 CSRF token，请检查 cookie 是否有效")
-        sys.exit(1)
+        raise ShanbayError("未找到 CSRF token，请检查 cookie 是否有效")
 
     s = requests.Session()
     s.cookies.update(jar)
@@ -269,17 +300,36 @@ def get_session():
     return s
 
 
+def request_with_retry(session, method, url, **kwargs):
+    """带指数退避重试的请求封装"""
+    kwargs.setdefault("timeout", 10)
+    last_exception = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = session.request(method, url, **kwargs)
+            r.raise_for_status()
+            return r
+        except requests.exceptions.RequestException as e:
+            last_exception = e
+            if attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF_BASE ** attempt
+                logger.warning(f"[!] 请求失败（第 {attempt + 1}/{MAX_RETRIES} 次），{wait}秒后重试：{e}")
+                time.sleep(wait)
+            else:
+                logger.error(f"[-] 请求失败，已重试 {MAX_RETRIES} 次：{e}")
+    raise last_exception
+
+
 def get_book_id(s):
     """获取当前词书的 API 路径标识（如 segal/cet4 等短码）"""
     try:
-        r = s.get("https://apiv3.shanbay.com/wordsapp/user_material_books/current", timeout=10)
-        r.raise_for_status()
+        r = request_with_retry(s, "GET", "https://apiv3.shanbay.com/wordsapp/user_material_books/current")
         data = r.json()
         
         # 验证响应数据结构
         if not isinstance(data, dict):
             logger.error("[-] API 返回数据格式错误：非字典类型")
-            return "segle"
+            raise ShanbayError("词书 API 返回数据格式错误")
             
         # 词书短码在 materialbook_id（顶层）或 materialbook.id 中；
         # learning_task_id 是任务 id，不能用于 URL，否则会 404
@@ -289,25 +339,23 @@ def get_book_id(s):
             if isinstance(materialbook, dict):
                 book_id = materialbook.get("id")
         if not book_id:
-            book_id = "segle"
+            raise ShanbayError("无法从 API 响应中获取词书 ID")
 
         return book_id
-    except requests.exceptions.RequestException as e:
-        logger.error(f"[-] 获取词书 ID 失败：{e}")
-        return "segle"
+    except ShanbayError:
+        raise
     except json.JSONDecodeError as e:
         logger.error(f"[-] 解析 API 响应失败：{e}")
-        return "segle"
+        raise ShanbayError(f"解析词书 API 响应失败：{e}")
 
 
-def complete_daily(s, book_id="segle"):
+def complete_daily(s, book_id):
     """完成每日背词任务"""
     base = f"https://apiv3.shanbay.com/wordsapp/user_material_books/{book_id}/learning"
 
     try:
         # 1. 检查状态
-        r = s.get(f"{base}/statuses", timeout=10)
-        r.raise_for_status()
+        r = request_with_retry(s, "GET", f"{base}/statuses")
         status = r.json()
         
         if not isinstance(status, dict):
@@ -322,8 +370,7 @@ def complete_daily(s, book_id="segle"):
         logger.info(f"[*] 今日任务：{status.get('a_count', 0)} 新词 + {status.get('c_count', 0)} 复习")
 
         # 2. 获取待学词条
-        r = s.get(f"{base}/items/sync", timeout=10)
-        r.raise_for_status()
+        r = request_with_retry(s, "GET", f"{base}/items/sync")
         data = r.json()
         
         if not isinstance(data, dict):
@@ -343,16 +390,18 @@ def complete_daily(s, book_id="segle"):
             return {"item_id": i["item_id"], "schedule": i.get("schedule", 0), "failed_count": i.get("failed_count", 0)}
 
         # 3. 全部标记为"认识"提交
+        # 学习时间随机化，每个词 3-8 秒，避免风控检测
+        learning_time = max(total * random.randint(3, 8), 60)
         body = {
             "a_items": [],
             "a_items_known": [to_item(i) for i in a_items if to_item(i)],
             "c_items": [],
             "c_items_known": [to_item(i) for i in c_items if to_item(i)],
             "date": status.get("date", ""),
-            "learning_time": max(total * 3, 60),  # 模拟学习时间
+            "learning_time": learning_time,
         }
 
-        r = s.put(f"{base}/items/sync", json=body, timeout=10)
+        r = request_with_retry(s, "PUT", f"{base}/items/sync", json=body)
         if r.status_code == 200:
             logger.info(f"[+] 完成！{len(a_items)} 新词 + {len(c_items)} 复习，全部标记为认识")
             return True
@@ -360,7 +409,7 @@ def complete_daily(s, book_id="segle"):
             logger.error(f"[-] 提交失败：{r.status_code} {r.text[:200]}")
             return False
     except requests.exceptions.RequestException as e:
-        logger.error(f"[-] 网络请求失败：{e}")
+        logger.error(f"[-] 网络请求失败（已重试 {MAX_RETRIES} 次）：{e}")
         return False
     except json.JSONDecodeError as e:
         logger.error(f"[-] JSON 解析失败：{e}")
@@ -386,10 +435,17 @@ def main():
         return
     
     # 4. 执行任务
-    s = get_session()
-    logger.info("[+] Cookie 有效")
-    book_id = get_book_id(s)
-    success = complete_daily(s, book_id=book_id)
+    try:
+        s = get_session()
+        logger.info("[+] Cookie 有效")
+        book_id = get_book_id(s)
+        success = complete_daily(s, book_id=book_id)
+    except ShanbayError as e:
+        logger.error(f"[-] 任务执行失败：{e}")
+        success = False
+    except Exception as e:
+        logger.error(f"[-] 未预期的错误：{e}")
+        success = False
     
     # 5. 更新状态
     if success:
