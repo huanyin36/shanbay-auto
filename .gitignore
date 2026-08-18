@@ -5,6 +5,7 @@
 
 # State files
 .shanbay_state.json
+.shanbay_config.json
 
 # Environment
 .env

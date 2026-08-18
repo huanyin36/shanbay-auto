@@ -1,10 +1,10 @@
 # shanbay-auto
 
-扇贝单词每日自动刷词脚本。纯 API 调用，无需浏览器，1 秒完成每日背词任务。
+扇贝单词每日自动刷词脚本。纯 API 调用，无需浏览器操作，1 秒完成每日背词任务。
 
 ## 原理
 
-通过 Chrome DevTools Protocol (CDP) 直接从运行中的 Edge 进程读取已登录的扇贝 cookie，调用扇贝内部 API 将当日全部词条标记为"认识"，跳过浏览器渲染和 UI 交互。
+通过 Chrome DevTools Protocol (CDP) 直接从运行中的浏览器进程读取已登录的扇贝 cookie，调用扇贝内部 API 将当日全部词条标记为"认识"，跳过浏览器渲染和 UI 交互。
 
 > **为什么用 CDP？** 新版 Edge 更改了 cookie 加密格式（32 字节裸 AES 密钥），传统解密方式（如 rookiepy）已失效。本方案使用 CDP 完全绕过解密，直接从浏览器内存获取 cookie。
 
@@ -12,6 +12,8 @@
 
 - **纯 API 调用**，不渲染页面、不模拟点击，1 秒完成
 - **CDP 提取 cookie**，绕过 Edge 新版加密，无需手动复制
+- **支持 Edge 和 Chrome**，安装时自由选择
+- **浏览器自动启动**，未运行时自动拉起并附加调试端口
 - **自动重试**，网络请求失败时指数退避重试 3 次
 - **学习时间随机化**，每词 3-8 秒随机，降低风控风险
 - **日志自动清理**，每周清理超过 7 天的日志
@@ -22,13 +24,30 @@
 ## 快速开始（推荐）
 
 1. 安装 [Python](https://www.python.org)，安装时勾选 **Add python.exe to PATH**
-2. 在 Edge 浏览器登录 [web.shanbay.com](https://web.shanbay.com)
-3. **建议将 Edge 设置为开机自启**（脚本需要连接运行中的 Edge 进程）
-4. 双击 `install.bat`
+2. 在浏览器中登录 [web.shanbay.com](https://web.shanbay.com)
+3. 双击 `install.bat`
 
-`install.bat` 会自动安装依赖（含 `websocket-client`），并创建登录触发的计划任务 `ShanbayDaily`。登录后延迟 45 秒自动执行（等待网络就绪和 Edge 启动），同一天只跑一次（由 `.shanbay_state.json` 去重，失败当天可重试）。
+`install.bat` 会引导你完成以下步骤：
 
-> **重要**：脚本运行时 Edge 必须处于运行状态（CDP 需要连接活跃的浏览器进程）。
+```
+============================================
+  shanbay-auto installer
+============================================
+
+[1/4] Checking Python...
+[2/4] Installing dependencies...
+[3/4] Choose browser...
+
+  1) Edge  (default)
+  2) Chrome
+
+Select browser [1/2] (default 1):
+[4/4] Creating logon scheduled task...
+```
+
+安装完成后，每次开机登录后延迟 45 秒自动执行（等待网络就绪和浏览器启动），同一天只跑一次。
+
+> **提示**：浏览器选择会保存到 `.shanbay_config.json`，之后自动读取。如需更换浏览器，重新运行 `install.bat` 即可。
 
 - 手动跑一次：双击 `run.bat`
 - 运行日志：`shanbay.log`
@@ -44,39 +63,33 @@ python shanbay.py
 输出示例：
 
 ```
-[*] 扇贝单词自动刷词 v4 (CDP+API)
+[*] 扇贝单词自动刷词 v4 (CDP+API) - Edge
+[*] 浏览器未运行，正在启动 Edge 并附加调试端口...
+[+] Edge 调试端口就绪
 [+] Cookie 有效
 [*] 今日任务: 40 新词 + 0 复习
 [+] 完成！40 新词 + 0 复习，全部标记为认识
 ```
 
-## 配置（可选）
+## 配置
 
-脚本默认使用 Edge 自身默认配置，标准安装开箱即用。通过环境变量可自定义以下选项：
+### 浏览器选择
 
-| 环境变量 | 说明 | 默认值 |
-| --- | --- | --- |
-| `SHANBAY_EDGE_PATH` | Edge 可执行文件路径 | （自动检测：注册表 → 标准路径） |
-| `SHANBAY_EDGE_USER_DATA_DIR` | Edge 用户数据目录 | （Edge 默认，不指定） |
-| `SHANBAY_EDGE_DISK_CACHE_DIR` | Edge 磁盘缓存目录 | （Edge 默认，不指定） |
-| `SHANBAY_EDGE_PATH` | Edge 可执行文件路径 | （自动检测） |
+通过以下方式指定浏览器（优先级从高到低）：
 
-示例：
+1. **环境变量** `SHANBAY_BROWSER`（值为 `edge` 或 `chrome`）
+2. **配置文件** `.shanbay_config.json`（`install.bat` 自动生成）
+3. **默认** Edge
 
-```bat
-set SHANBAY_EDGE_PATH=C:\Portable\Edge\msedge.exe
-set SHANBAY_EDGE_USER_DATA_DIR=C:\MyEdge\Data
-set SHANBAY_EDGE_DISK_CACHE_DIR=C:\MyEdge\Cache
-python shanbay.py
-```
+
 
 ## 注意事项
 
-- 仅支持 Windows + Edge（CDP 需连接运行中的 Edge 进程）
-- **脚本运行时 Edge 必须处于运行状态**
-- Edge 中扇贝登录态过期后需重新登录一次
+- 支持 Windows + Edge 或 Chrome（CDP 需连接运行中的浏览器进程）
+- 浏览器未运行时脚本会自动启动，但需在浏览器中保持扇贝登录态
+- 浏览器中扇贝登录态过期后需重新登录一次
 - 所有词条标记为"认识"，适合刷量/打卡场景，不适合真正背词
-- 脚本会通过 CDP 开启 Edge 远程调试端口（9222），仅用于本地提取 cookie
+- 脚本会通过 CDP 开启浏览器远程调试端口（9222），仅用于本地提取 cookie
 - 请自行评估使用风险
 
 ## 更新日志
