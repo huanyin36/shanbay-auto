@@ -1,6 +1,6 @@
 r"""
 扇贝单词自动刷词 v4 - CDP + API 版
-通过 Chrome DevTools Protocol 从 Edge 提取 cookie，调用 API 完成刷词。
+通过 Chrome DevTools Protocol 从浏览器提取 cookie，调用 API 完成刷词。
 解决了新版 Edge cookie 加密格式变化导致 rookiepy 无法解密的问题。
 
 依赖: pip install requests websocket-client
@@ -12,10 +12,13 @@ r"""
 - 网络请求自动重试（指数退避）
 - WebSocket 超时保护
 - 学习时间随机化以规避风控
+- 支持 Edge 和 Chrome 浏览器，浏览器未运行时自动启动
 
 配置说明:
-- 可通过环境变量 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 自定义 Edge 用户数据目录与缓存目录；未设置时默认使用 Edge 自身配置（标准安装开箱即用），仅便携版等需自定义路径时再设置
-- 可通过环境变量 SHANBAY_EDGE_PATH 自定义 Edge 可执行文件路径
+- 浏览器选择通过 .shanbay_config.json 或环境变量 SHANBAY_BROWSER 指定（edge / chrome）
+- 可通过环境变量 SHANBAY_BROWSER_PATH 自定义浏览器可执行文件路径
+- 可通过环境变量 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 自定义 Edge 用户数据目录与缓存目录
+- 可通过环境变量 SHANBAY_CHROME_USER_DATA_DIR / SHANBAY_CHROME_DISK_CACHE_DIR 自定义 Chrome 用户数据目录与缓存目录
 """
 
 import sys
@@ -38,19 +41,17 @@ import websocket
 SCRIPT_DIR = Path(__file__).parent.resolve()
 STATE_FILE = SCRIPT_DIR / ".shanbay_state.json"
 LOG_FILE = SCRIPT_DIR / "shanbay.log"
-
-# Edge 用户数据目录与缓存目录：默认不指定，使用 Edge 自身默认配置（标准安装开箱即用）；
-# 仅当设置了对应环境变量时才显式追加 --user-data-dir / --disk-cache-dir（便携版 Edge 等场景）。
-EDGE_USER_DATA_DIR = os.environ.get("SHANBAY_EDGE_USER_DATA_DIR")
-EDGE_DISK_CACHE_DIR = os.environ.get("SHANBAY_EDGE_DISK_CACHE_DIR")
-# 自定义 Edge 可执行文件路径（可选）
-EDGE_EXE_PATH = os.environ.get("SHANBAY_EDGE_PATH")
+CONFIG_FILE = SCRIPT_DIR / ".shanbay_config.json"
 
 # 网络请求重试配置
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2  # 指数退避基数（秒）
 
-# 配置日志 - 自定义过滤器以脱敏敏感信息
+# 支持的浏览器类型
+BROWSER_EDGE = "edge"
+BROWSER_CHROME = "chrome"
+
+
 class SensitiveDataFilter(logging.Filter):
     """过滤日志中的敏感数据"""
     SENSITIVE_PATTERNS = [
@@ -83,6 +84,26 @@ logger.addFilter(SensitiveDataFilter())
 class ShanbayError(Exception):
     """扇贝脚本自定义异常"""
     pass
+
+
+def load_config():
+    """加载配置文件（浏览器选择等）"""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"配置文件读取失败：{e}")
+    return {}
+
+
+def save_config(config):
+    """保存配置文件"""
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        logger.error(f"配置文件写入失败：{e}")
 
 
 def load_state():
@@ -153,12 +174,41 @@ def cleanup_old_logs():
         logger.error(f"[-] 日志清理失败：{e}")
 
 
-def find_edge_exe():
-    """查找 Edge 可执行文件路径"""
-    # 0. 环境变量指定的路径（最高优先级）
-    if EDGE_EXE_PATH and os.path.isfile(EDGE_EXE_PATH):
-        return EDGE_EXE_PATH
+def get_browser_type():
+    """获取浏览器类型（edge / chrome），优先级：环境变量 > 配置文件 > 默认 edge"""
+    env_browser = os.environ.get("SHANBAY_BROWSER", "").lower()
+    if env_browser in (BROWSER_EDGE, BROWSER_CHROME):
+        return env_browser
+    config = load_config()
+    config_browser = config.get("browser", "").lower()
+    if config_browser in (BROWSER_EDGE, BROWSER_CHROME):
+        return config_browser
+    return BROWSER_EDGE  # 默认 Edge
 
+
+def find_browser_exe(browser_type=None):
+    """
+    查找浏览器可执行文件路径
+    支持 edge 和 chrome
+    """
+    if browser_type is None:
+        browser_type = get_browser_type()
+
+    # 环境变量指定的路径（最高优先级）
+    env_var = "SHANBAY_BROWSER_PATH" if browser_type == BROWSER_CHROME else "SHANBAY_EDGE_PATH"
+    custom_path = os.environ.get(env_var) or os.environ.get("SHANBAY_BROWSER_PATH")
+    if custom_path and os.path.isfile(custom_path):
+        return custom_path
+
+    if browser_type == BROWSER_EDGE:
+        return _find_edge_exe()
+    elif browser_type == BROWSER_CHROME:
+        return _find_chrome_exe()
+    return None
+
+
+def _find_edge_exe():
+    """查找 Edge 可执行文件路径"""
     # 1. 注册表（标准安装）
     try:
         import winreg
@@ -180,8 +230,51 @@ def find_edge_exe():
     return None
 
 
+def _find_chrome_exe():
+    """查找 Chrome 可执行文件路径"""
+    # 1. 注册表（标准安装）
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
+        path = winreg.QueryValue(key, None)
+        winreg.CloseKey(key)
+        if path and os.path.isfile(path):
+            return path
+    except Exception:
+        pass
+
+    # 2. 标准路径
+    for env_var in ["PROGRAMFILES", "PROGRAMFILES(X86)"]:
+        p = os.path.join(os.environ.get(env_var, ""), r"Google\Chrome\Application\chrome.exe")
+        if os.path.isfile(p):
+            return p
+
+    # 3. LocalAppData
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        p = os.path.join(local_app, r"Google\Chrome\Application\chrome.exe")
+        if os.path.isfile(p):
+            return p
+
+    return None
+
+
+def get_browser_dirs(browser_type):
+    """获取浏览器的用户数据目录和缓存目录（从环境变量读取，未设置则返回 None）"""
+    if browser_type == BROWSER_EDGE:
+        user_data = os.environ.get("SHANBAY_EDGE_USER_DATA_DIR")
+        disk_cache = os.environ.get("SHANBAY_EDGE_DISK_CACHE_DIR")
+    else:
+        user_data = os.environ.get("SHANBAY_CHROME_USER_DATA_DIR")
+        disk_cache = os.environ.get("SHANBAY_CHROME_DISK_CACHE_DIR")
+    return user_data, disk_cache
+
+
 def ensure_debug_port(port=9222):
-    """确保 Edge 开启了远程调试端口"""
+    """确保浏览器开启了远程调试端口，未运行则自动启动"""
+    browser_type = get_browser_type()
+
     # 已经开了？
     try:
         r = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=2)
@@ -190,26 +283,29 @@ def ensure_debug_port(port=9222):
     except Exception:
         pass
 
-    edge_exe = find_edge_exe()
-    if not edge_exe:
-        logger.error("[-] 找不到 Edge 浏览器，可通过环境变量 SHANBAY_EDGE_PATH 指定路径")
+    browser_exe = find_browser_exe(browser_type)
+    if not browser_exe:
+        browser_name = "Edge" if browser_type == BROWSER_EDGE else "Chrome"
+        env_var = "SHANBAY_EDGE_PATH" if browser_type == BROWSER_EDGE else "SHANBAY_BROWSER_PATH"
+        logger.error(f"[-] 找不到 {browser_name} 浏览器，可通过环境变量 {env_var} 指定路径")
         return False
 
-    # 启动 Edge 并附加调试端口。
-    # 默认不指定 user-data-dir / disk-cache-dir，让 Edge 使用自身默认用户配置（标准安装开箱即用）。
-    # 仅当设置了 SHANBAY_EDGE_USER_DATA_DIR / SHANBAY_EDGE_DISK_CACHE_DIR 时才追加对应参数，
-    # 以便便携版 Edge 等自定义场景使用。
-    edge_args = [
-        edge_exe,
+    browser_name = "Edge" if browser_type == BROWSER_EDGE else "Chrome"
+    logger.info(f"[*] 浏览器未运行，正在启动 {browser_name} 并附加调试端口...")
+
+    # 启动浏览器并附加调试端口
+    user_data_dir, disk_cache_dir = get_browser_dirs(browser_type)
+    browser_args = [
+        browser_exe,
         f"--remote-debugging-port={port}",
         "--no-first-run",
         "--no-default-browser-check",
     ]
-    if EDGE_USER_DATA_DIR:
-        edge_args.append(f"--user-data-dir={EDGE_USER_DATA_DIR}")
-    if EDGE_DISK_CACHE_DIR:
-        edge_args.append(f"--disk-cache-dir={EDGE_DISK_CACHE_DIR}")
-    subprocess.Popen(edge_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if user_data_dir:
+        browser_args.append(f"--user-data-dir={user_data_dir}")
+    if disk_cache_dir:
+        browser_args.append(f"--disk-cache-dir={disk_cache_dir}")
+    subprocess.Popen(browser_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 等待端口就绪
     for _ in range(20):
@@ -217,24 +313,25 @@ def ensure_debug_port(port=9222):
         try:
             r = requests.get(f"http://127.0.0.1:{port}/json/version", timeout=2)
             if r.ok:
+                logger.info(f"[+] {browser_name} 调试端口就绪")
                 return True
         except Exception:
             continue
 
-    logger.error("[-] Edge 调试端口启动超时")
+    logger.error(f"[-] {browser_name} 调试端口启动超时")
     return False
 
 
 def get_cookies_via_cdp(port=9222):
-    """通过 CDP 从 Edge 提取扇贝 cookie"""
+    """通过 CDP 从浏览器提取扇贝 cookie"""
     try:
         pages = requests.get(f"http://127.0.0.1:{port}/json", timeout=5).json()
     except Exception as e:
-        logger.error(f"[-] 无法连接 Edge 调试端口：{e}")
+        logger.error(f"[-] 无法连接浏览器调试端口：{e}")
         return {}
 
     if not pages:
-        logger.error("[-] Edge 没有打开的页面")
+        logger.error("[-] 浏览器没有打开的页面")
         return {}
 
     # 用第一个页面获取 cookie
@@ -276,13 +373,13 @@ def get_cookies_via_cdp(port=9222):
 
 
 def get_session():
-    """从 Edge 浏览器提取扇贝 cookie，构建请求会话"""
+    """从浏览器提取扇贝 cookie，构建请求会话"""
     if not ensure_debug_port():
-        raise ShanbayError("无法开启 Edge 调试端口")
+        raise ShanbayError("无法开启浏览器调试端口")
 
     jar = get_cookies_via_cdp()
     if not jar:
-        raise ShanbayError("未找到扇贝 cookie，请先在 Edge 中登录 web.shanbay.com")
+        raise ShanbayError("未找到扇贝 cookie，请先在浏览器中登录 web.shanbay.com")
 
     csrf = jar.get("csrftoken", "")
     if not csrf:
@@ -420,7 +517,9 @@ def complete_daily(s, book_id):
 
 
 def main():
-    logger.info("[*] 扇贝单词自动刷词 v4 (CDP+API)")
+    browser_type = get_browser_type()
+    browser_name = "Edge" if browser_type == BROWSER_EDGE else "Chrome"
+    logger.info(f"[*] 扇贝单词自动刷词 v4 (CDP+API) - {browser_name}")
     
     # 1. 先清理旧日志（每周一次）
     cleanup_old_logs()
