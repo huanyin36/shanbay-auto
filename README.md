@@ -1,12 +1,23 @@
 # shanbay-auto
 
-扇贝单词每日自动刷词脚本。纯 API 调用，无需浏览器，1秒完成每日背词任务。
+扇贝单词每日自动刷词脚本。纯 API 调用，无需浏览器，1 秒完成每日背词任务。
 
 ## 原理
 
-通过 Chrome DevTools Protocol (CDP) 直接从运行中的 Edge 进程读取已登录的扇贝 cookie，直接调用扇贝内部 API 将当日全部词条标记为"认识"，跳过浏览器渲染和 UI 交互。
+通过 Chrome DevTools Protocol (CDP) 直接从运行中的 Edge 进程读取已登录的扇贝 cookie，调用扇贝内部 API 将当日全部词条标记为"认识"，跳过浏览器渲染和 UI 交互。
 
-> **注意**：新版 Edge 更改了 cookie 加密格式（32字节裸 AES 密钥），传统解密方式（如 rookiepy）已失效。本方案使用 CDP 完全绕过解密，直接从浏览器内存获取 cookie。
+> **为什么用 CDP？** 新版 Edge 更改了 cookie 加密格式（32 字节裸 AES 密钥），传统解密方式（如 rookiepy）已失效。本方案使用 CDP 完全绕过解密，直接从浏览器内存获取 cookie。
+
+## 特性
+
+- **纯 API 调用**，不渲染页面、不模拟点击，1 秒完成
+- **CDP 提取 cookie**，绕过 Edge 新版加密，无需手动复制
+- **自动重试**，网络请求失败时指数退避重试 3 次
+- **学习时间随机化**，每词 3-8 秒随机，降低风控风险
+- **日志自动清理**，每周清理超过 7 天的日志
+- **日志脱敏**，自动屏蔽 cookie、token 等敏感信息
+- **每日去重**，同一天只执行一次，失败可重试
+- **开机自启**，安装计划任务，登录后自动运行
 
 ## 快速开始（推荐）
 
@@ -15,7 +26,7 @@
 3. **建议将 Edge 设置为开机自启**（脚本需要连接运行中的 Edge 进程）
 4. 双击 `install.bat`
 
-`install.bat` 会自动安装依赖（含 `websocket-client`），并创建登录触发的计划任务 `ShanbayDaily`。之后每次开机登录自动刷词，同一天只跑一次（由 `.shanbay_state.json` 去重，失败当天可重试）。
+`install.bat` 会自动安装依赖（含 `websocket-client`），并创建登录触发的计划任务 `ShanbayDaily`。登录后延迟 45 秒自动执行（等待网络就绪和 Edge 启动），同一天只跑一次（由 `.shanbay_state.json` 去重，失败当天可重试）。
 
 > **重要**：脚本运行时 Edge 必须处于运行状态（CDP 需要连接活跃的浏览器进程）。
 
@@ -31,6 +42,7 @@ python shanbay.py
 ```
 
 输出示例：
+
 ```
 [*] 扇贝单词自动刷词 v4 (CDP+API)
 [+] Cookie 有效
@@ -40,17 +52,19 @@ python shanbay.py
 
 ## 配置（可选）
 
-脚本会启动一个带调试端口的 Edge 实例来提取扇贝 cookie。脚本默认不指定用户数据目录与缓存目录，直接使用 Edge 自身默认配置（标准安装开箱即用），你可以通过环境变量覆盖：
+脚本默认使用 Edge 自身默认配置，标准安装开箱即用。通过环境变量可自定义以下选项：
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
+| `SHANBAY_EDGE_PATH` | Edge 可执行文件路径 | （自动检测：注册表 → 标准路径） |
 | `SHANBAY_EDGE_USER_DATA_DIR` | Edge 用户数据目录 | （Edge 默认，不指定） |
 | `SHANBAY_EDGE_DISK_CACHE_DIR` | Edge 磁盘缓存目录 | （Edge 默认，不指定） |
 | `SHANBAY_EDGE_PATH` | Edge 可执行文件路径 | （自动检测） |
 
-例如自定义到其他路径：
+示例：
 
 ```bat
+set SHANBAY_EDGE_PATH=C:\Portable\Edge\msedge.exe
 set SHANBAY_EDGE_USER_DATA_DIR=C:\MyEdge\Data
 set SHANBAY_EDGE_DISK_CACHE_DIR=C:\MyEdge\Cache
 python shanbay.py
@@ -62,6 +76,7 @@ python shanbay.py
 - **脚本运行时 Edge 必须处于运行状态**
 - Edge 中扇贝登录态过期后需重新登录一次
 - 所有词条标记为"认识"，适合刷量/打卡场景，不适合真正背词
+- 脚本会通过 CDP 开启 Edge 远程调试端口（9222），仅用于本地提取 cookie
 - 请自行评估使用风险
 
 ## 更新日志
